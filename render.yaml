@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: innsider
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app
+    plan: free
