@@ -138,6 +138,34 @@
     .filter-btn:hover { color: var(--text); }
     .filter-btn.active { color: var(--text); border-color: var(--accent-blue); }
 
+    .view-switcher { margin-bottom: 20px; }
+    .view-btns { display: flex; gap: 6px; margin-bottom: 10px; }
+    .view-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.83rem;
+      transition: all 0.15s;
+    }
+    .view-btn:hover { border-color: var(--accent-blue); color: var(--text); }
+    .view-btn.active {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: #fff;
+    }
+    .view-desc {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+      max-width: 900px;
+    }
+    .view-desc strong { color: var(--text); font-weight: 600; }
+    .view-desc .pro { color: var(--accent-buy); }
+    .view-desc .con { color: var(--accent-sell); }
+
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
     th {
@@ -217,11 +245,20 @@
 <main>
   <div class="status-bar" id="statusBar"></div>
 
+  <div class="view-switcher">
+    <div class="view-btns" id="viewBtns">
+      <button class="view-btn active" data-view="value">By Value</button>
+      <button class="view-btn" data-view="liquidity">By Liquidity</button>
+      <button class="view-btn" data-view="insiders">By Insiders</button>
+    </div>
+    <p class="view-desc" id="viewDesc"></p>
+  </div>
+
   <div class="charts-grid">
     <div class="card">
       <div class="card-header">
         <div class="dot dot-buy"></div>
-        <h2>Top Insider Buys — Total NOK Value</h2>
+        <h2 id="buyChartTitle">Top Insider Buys — Total NOK Value</h2>
       </div>
       <div class="chart-wrap" id="buyChartWrap">
         <div class="loading"><div class="spinner"></div><span>Loading…</span></div>
@@ -230,7 +267,7 @@
     <div class="card">
       <div class="card-header">
         <div class="dot dot-sell"></div>
-        <h2>Top Insider Sells — Total NOK Value</h2>
+        <h2 id="sellChartTitle">Top Insider Sells — Total NOK Value</h2>
       </div>
       <div class="chart-wrap" id="sellChartWrap">
         <div class="loading"><div class="spinner"></div><span>Loading…</span></div>
@@ -256,6 +293,8 @@
 <script>
 let currentDays = 90;
 let currentFilter = 'all';
+let currentView = 'value';
+let latestData = null;
 let allTrades = [];
 let buyChart = null;
 let sellChart = null;
@@ -266,6 +305,43 @@ const fmtM = v => {
   if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
   if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
   return fmt.format(v);
+};
+
+// Each view ranks tickers by a different metric, on purpose — each one is
+// biased in its own way, so they're offered side by side rather than merged
+// into a single "correct" score.
+const VIEWS = {
+  value: {
+    label: 'Total NOK Value',
+    dataKey: 'by_value',
+    metric: x => x.value,
+    axisFmt: v => 'NOK ' + fmtM(v),
+    tooltipLine: x => `Total: NOK ${fmt.format(x.value)}`,
+    desc: '<strong>Total NOK traded.</strong> ' +
+      '<span class="pro">+ Shows real money at stake.</span> ' +
+      '<span class="con">− Favors large, liquid companies, since insiders there routinely trade in bigger blocks even without any particular signal behind it.</span>',
+  },
+  liquidity: {
+    label: '% of Avg. Daily Volume',
+    dataKey: 'by_liquidity',
+    metric: x => x.pct_adv,
+    axisFmt: v => v.toFixed(0) + '%',
+    tooltipLine: x => x.pct_adv != null ? `${x.pct_adv}% of avg. daily volume (NOK ${fmtM(x.avg_daily_value)}/day)` : 'Liquidity data unavailable',
+    desc: '<strong>Trade value as a share of the stock’s typical daily trading volume.</strong> ' +
+      '<span class="pro">+ Flags trades that are unusual for that specific stock, which corrects the large-cap bias in the value view.</span> ' +
+      '<span class="con">− Thinly-traded small caps can dominate from modest NOK amounts, and it’s based on a 1-month average volume so still noisy for illiquid names.</span>',
+  },
+  insiders: {
+    label: 'Distinct Insiders',
+    dataKey: 'by_insiders',
+    metric: x => x.insiders,
+    axisFmt: v => v.toFixed(0),
+    yStepSize: 1,
+    tooltipLine: x => `${x.insiders} distinct insider${x.insiders === 1 ? '' : 's'}`,
+    desc: '<strong>Number of different insiders trading, not trade size.</strong> ' +
+      '<span class="pro">+ Multiple people acting independently is a harder signal to explain away than one person’s large trade — the classic "cluster buying/selling" pattern.</span> ' +
+      '<span class="con">− Ignores size entirely, and name-matching is best-effort: some announcement formats aren’t recognized, so counts can undercount.</span>',
+  },
 };
 
 async function loadData(days) {
@@ -287,43 +363,49 @@ async function loadData(days) {
     return;
   }
 
+  latestData = data;
   allTrades = data.trades || [];
 
   // Status bar
-  const totalBuy = (data.top_buys || []).reduce((s, x) => s + x.value, 0);
-  const totalSell = (data.top_sells || []).reduce((s, x) => s + x.value, 0);
   document.getElementById('statusBar').innerHTML = `
     <div class="stat-chip"><strong>${data.total_parsed}</strong><span>parsed trades</span></div>
     <div class="stat-chip"><strong>${data.from_date}</strong><span>to</span><strong style="margin-left:4px">${data.to_date}</strong></div>
-    <div class="stat-chip" style="color:var(--accent-buy)"><strong>NOK ${fmtM(totalBuy)}</strong><span style="color:var(--text-muted)"> total bought</span></div>
-    <div class="stat-chip" style="color:var(--accent-sell)"><strong>NOK ${fmtM(totalSell)}</strong><span style="color:var(--text-muted)"> total sold</span></div>
+    <div class="stat-chip" style="color:var(--accent-buy)"><strong>NOK ${fmtM(data.total_buy_value || 0)}</strong><span style="color:var(--text-muted)"> total bought</span></div>
+    <div class="stat-chip" style="color:var(--accent-sell)"><strong>NOK ${fmtM(data.total_sell_value || 0)}</strong><span style="color:var(--text-muted)"> total sold</span></div>
   `;
 
-  renderBarChart('buyChartWrap', data.top_buys, 'buy', buyChart, c => buyChart = c);
-  renderBarChart('sellChartWrap', data.top_sells, 'sell', sellChart, c => sellChart = c);
+  renderView();
   renderTable(allTrades, currentFilter);
 }
 
-function renderBarChart(wrapperId, items, type, existingChart, setChart) {
+function renderView() {
+  const view = VIEWS[currentView];
+  document.getElementById('viewDesc').innerHTML = view.desc;
+  document.getElementById('buyChartTitle').textContent = `Top Insider Buys — ${view.label}`;
+  document.getElementById('sellChartTitle').textContent = `Top Insider Sells — ${view.label}`;
+
+  if (!latestData) return;
+  buyChart = renderBarChart('buyChartWrap', latestData.buys[view.dataKey], 'buy', buyChart, view);
+  sellChart = renderBarChart('sellChartWrap', latestData.sells[view.dataKey], 'sell', sellChart, view);
+}
+
+function renderBarChart(wrapperId, items, type, existingChart, view) {
   const wrap = document.getElementById(wrapperId);
+  if (existingChart) existingChart.destroy();
+
   if (!items || items.length === 0) {
-    wrap.innerHTML = '<div class="empty-msg">No data found for this period.</div>';
-    return;
+    wrap.innerHTML = '<div class="empty-msg">No data found for this view.</div>';
+    return null;
   }
 
   wrap.innerHTML = '<canvas></canvas>';
   const canvas = wrap.querySelector('canvas');
   canvas.style.display = 'block';
 
-  if (existingChart) existingChart.destroy();
-
   const color = type === 'buy' ? '#22c55e' : '#ef4444';
   const colorAlpha = type === 'buy' ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
-
   const labels = items.map(x => x.ticker);
-  const values = items.map(x => x.value);
-  const tooltipCompanies = items.map(x => x.company);
-  const tooltipTrades = items.map(x => x.trades);
+  const values = items.map(x => view.metric(x));
 
   const chart = new Chart(canvas, {
     type: 'bar',
@@ -345,10 +427,10 @@ function renderBarChart(wrapperId, items, type, existingChart, setChart) {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            title: (ctx) => `${ctx[0].label} — ${tooltipCompanies[ctx[0].dataIndex]}`,
+            title: (ctx) => `${ctx[0].label} — ${items[ctx[0].dataIndex].company}`,
             label: (ctx) => [
-              `  Total: NOK ${fmt.format(ctx.raw)}`,
-              `  Trades: ${tooltipTrades[ctx.dataIndex]}`,
+              `  ${view.tooltipLine(items[ctx.dataIndex])}`,
+              `  Trades: ${items[ctx.dataIndex].trades}  ·  Insiders: ${items[ctx.dataIndex].insiders}`,
             ],
           },
           backgroundColor: '#1a1d27',
@@ -369,15 +451,16 @@ function renderBarChart(wrapperId, items, type, existingChart, setChart) {
           ticks: {
             color: '#94a3b8',
             font: { size: 11 },
-            callback: v => 'NOK ' + fmtM(v),
+            callback: view.axisFmt,
           },
+          ...(view.yStepSize ? { ticks: { color: '#94a3b8', font: { size: 11 }, callback: view.axisFmt, stepSize: view.yStepSize } } : {}),
           grid: { color: '#1f2335' },
           border: { color: '#2e3350' },
         }
       }
     }
   });
-  setChart(chart);
+  return chart;
 }
 
 function renderTable(trades, filter) {
@@ -394,6 +477,7 @@ function renderTable(trades, filter) {
       <td>${t.date}</td>
       <td><span class="ticker-chip">${escHtml(t.ticker)}</span></td>
       <td class="text-muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(t.company)}</td>
+      <td class="text-muted">${t.insider ? escHtml(t.insider) : '—'}</td>
       <td><span class="badge badge-${t.action}">${t.action.toUpperCase()}</span></td>
       <td class="value-cell">${fmt.format(t.shares)}</td>
       <td class="value-cell">NOK ${t.price.toLocaleString('nb-NO', {minimumFractionDigits: 2, maximumFractionDigits: 4})}</td>
@@ -413,6 +497,7 @@ function renderTable(trades, filter) {
           <th>Date</th>
           <th>Ticker</th>
           <th>Company</th>
+          <th>Insider</th>
           <th>Action</th>
           <th>Shares</th>
           <th>Price / share</th>
@@ -452,6 +537,17 @@ document.querySelectorAll('.filter-btn').forEach(btn => {
   });
 });
 
+// View buttons
+document.querySelectorAll('.view-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentView = btn.dataset.view;
+    renderView();
+  });
+});
+
+document.getElementById('viewDesc').innerHTML = VIEWS.value.desc;
 loadData(currentDays);
 </script>
 </body>
